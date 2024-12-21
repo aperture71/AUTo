@@ -14,9 +14,9 @@
 MPU6050 mpu;
 
 // PID variables
-float kp = 1.0;  // Proportional gain
+float kp = 2.0;  // Proportional gain
 float ki = 0.0;  // Integral gain
-float kd = 0.0;  // Derivative gain
+float kd = 0.1;  // Derivative gain
 
 float targetPitch = 0.0;  // Target pitch orientation (degrees)
 float targetRoll = 0.0;   // Target roll orientation (degrees)
@@ -24,7 +24,9 @@ float lastPitchError = 0.0;
 float lastRollError = 0.0;
 float pitchIntegral = 0.0;
 float rollIntegral = 0.0;
-float dt = 0.02;
+float dt;
+
+unsigned long lastUpdateTime = 0;
 
 // Declare servos
 Servo pitchServo1;
@@ -48,14 +50,14 @@ Servo rollServo2;
 // (in degrees) calculated from the quaternions coming from the FIFO.
 // Note that Euler angles suffer from gimbal lock (for more info, see
 // http://en.wikipedia.org/wiki/Gimbal_lock)
-//#define OUTPUT_READABLE_EULER
+#define OUTPUT_READABLE_EULER
 
 // uncomment "OUTPUT_READABLE_YAWPITCHROLL" if you want to see the yaw/
 // pitch/roll angles (in degrees) calculated from the quaternions coming
 // from the FIFO. Note this also requires gravity vector calculations.
 // Also note that yaw/pitch/roll angles suffer from gimbal lock (for
 // more info, see: http://en.wikipedia.org/wiki/Gimbal_lock)
-#define OUTPUT_READABLE_YAWPITCHROLL
+//#define OUTPUT_READABLE_YAWPITCHROLL
 
 // uncomment "OUTPUT_READABLE_REALACCEL" if you want to see acceleration
 // components with gravity removed. This acceleration reference frame is
@@ -147,6 +149,9 @@ void calculatePitchPID(float currentQuaternionW, float currentQuaternionX) {
 
     adjustPitchServos(pitchControlSignal);
 
+    Serial.print(">PITCH: ");
+    Serial.println(pitchControlSignal);
+
     lastPitchError = pitchError;
 }
 
@@ -161,6 +166,9 @@ void calculateRollPID(float currentQuaternionW, float currentQuaternionY) {
     float rollControlSignal = kp * rollError + ki * rollIntegral + kd * rollDerivative;
 
     adjustRollServos(rollControlSignal);
+
+    Serial.print(">ROLL: ");
+    Serial.println(rollControlSignal);
 
     lastRollError = rollError;
 }
@@ -194,16 +202,16 @@ void setup() {
     devStatus = mpu.dmpInitialize();
 
     // supply your own gyro offsets here, scaled for min sensitivity
-    mpu.setXGyroOffset(220);
-    mpu.setYGyroOffset(76);
-    mpu.setZGyroOffset(-85);
-    mpu.setZAccelOffset(1788);
+    //mpu.setXGyroOffset(220);
+    //mpu.setYGyroOffset(76);
+    //mpu.setZGyroOffset(-85);
+    //mpu.setZAccelOffset(1788);
 
     // make sure mpu initialized (returns 0 if so)
     if (devStatus == 0) {
         // Calibration Time: generate offsets and calibrate our MPU6050
-        mpu.CalibrateAccel(6);
-        mpu.CalibrateGyro(6);
+        mpu.CalibrateAccel(60);
+        mpu.CalibrateGyro(60);
         mpu.PrintActiveOffsets();
         // turn on the DMP, now that it's ready
         Serial.println(F("Enabling DMP..."));
@@ -246,6 +254,7 @@ void loop() {
         #ifdef OUTPUT_READABLE_QUATERNION
             // display quaternion values in easy matrix form: w x y z
             mpu.dmpGetQuaternion(&q, fifoBuffer);
+            /*
             Serial.print("quat\t");
             Serial.print(q.w);
             Serial.print("\t");
@@ -254,10 +263,35 @@ void loop() {
             Serial.print(q.y);
             Serial.print("\t");
             Serial.println(q.z);
+            */
+
+            //Calculate new dt
+            unsigned long currentTime = millis();
+            dt = (currentTime - lastUpdateTime) / 1000.0; // Calculate true time delta in seconds
+            lastUpdateTime = currentTime;
+
 
             // calculates PID and adjusts servos
             calculatePitchPID(q.w, q.x);
             calculateRollPID(q.w, q.y);
+
+            // Send PID values to serial for plotting
+            /*
+            Serial.print("PID\t");
+            Serial.print(kp);
+            Serial.print("\t");
+            Serial.print(ki);
+            Serial.print("\t");
+            Serial.println(kd);
+            
+            Serial.print(pitchIntegral);
+            Serial.print("\t");
+            Serial.print(rollIntegral);
+            Serial.print("\t");
+            Serial.print(lastPitchError);
+            Serial.print("\t");
+            Serial.println(lastRollError);
+            */
 
         #endif
 
@@ -271,10 +305,6 @@ void loop() {
             Serial.print(euler[1] * 180/M_PI);
             Serial.print("\t");
             Serial.println(euler[2] * 180/M_PI);
-
-            //ADDED
-            float pitch = ypr[1] * 180 / M_PI;  // Convert pitch to degrees
-            calculatePID(pitch);
 
         #endif
 
