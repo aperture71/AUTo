@@ -275,24 +275,6 @@ void loop() {
             calculatePitchPID(q.w, q.x);
             calculateRollPID(q.w, q.y);
 
-            // Send PID values to serial for plotting
-            /*
-            Serial.print("PID\t");
-            Serial.print(kp);
-            Serial.print("\t");
-            Serial.print(ki);
-            Serial.print("\t");
-            Serial.println(kd);
-            
-            Serial.print(pitchIntegral);
-            Serial.print("\t");
-            Serial.print(rollIntegral);
-            Serial.print("\t");
-            Serial.print(lastPitchError);
-            Serial.print("\t");
-            Serial.println(lastRollError);
-            */
-
         #endif
 
         #ifdef OUTPUT_READABLE_EULER
