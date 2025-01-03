@@ -1,8 +1,11 @@
 //Required libraries
 #include "I2Cdev.h"
 #include "Servo.h"
-
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BMP280.h>
 #include "MPU6050_6Axis_MotionApps20.h"
+
+#include "helper_3dmath.h"
 
 // Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation
 // is used in I2Cdev.h
@@ -12,11 +15,19 @@
 
 //mpu6050 I2C address is 0x68
 MPU6050 mpu;
+Adafruit_BMP280 bmp;
 
 // PID variables
-float kp = 2.0;  // Proportional gain
-float ki = 0.0;  // Integral gain
-float kd = 0.1;  // Derivative gain
+float Kp = 500.0f; // Proportional gain
+float Kd = 0.2f; // Derivative gain
+float Ki = 0.0f; // Integral gain
+
+
+VectorFloat integralErr = {0.0f, 0.0f, 0.0f};
+
+Quaternion worldQuaternion = {0, 0, 0, 1};
+Quaternion refQuaternion;
+
 
 float targetPitch = 0.0;  // Target pitch orientation (degrees)
 float targetRoll = 0.0;   // Target roll orientation (degrees)
@@ -28,11 +39,13 @@ float dt;
 
 unsigned long lastUpdateTime = 0;
 
-// Declare servos
+float altitudeOffset = 0.0;
+
+// Declare servo objects
 Servo pitchServo1;
 Servo pitchServo2;
-Servo rollServo1;
-Servo rollServo2;
+Servo yawServo1;
+Servo yawServo2;
 
 // Servo pin assignments
 #define PITCH_SERVO1_PIN 2
@@ -40,49 +53,11 @@ Servo rollServo2;
 #define ROLL_SERVO1_PIN 3
 #define ROLL_SERVO2_PIN 4
 
-
-// uncomment "OUTPUT_READABLE_QUATERNION" if you want to see the actual
-// quaternion components in a [w, x, y, z] format (not best for parsing
-// on a remote host such as Processing or something though)
-#define OUTPUT_READABLE_QUATERNION
-
-// uncomment "OUTPUT_READABLE_EULER" if you want to see Euler angles
-// (in degrees) calculated from the quaternions coming from the FIFO.
-// Note that Euler angles suffer from gimbal lock (for more info, see
-// http://en.wikipedia.org/wiki/Gimbal_lock)
-#define OUTPUT_READABLE_EULER
-
-// uncomment "OUTPUT_READABLE_YAWPITCHROLL" if you want to see the yaw/
-// pitch/roll angles (in degrees) calculated from the quaternions coming
-// from the FIFO. Note this also requires gravity vector calculations.
-// Also note that yaw/pitch/roll angles suffer from gimbal lock (for
-// more info, see: http://en.wikipedia.org/wiki/Gimbal_lock)
-//#define OUTPUT_READABLE_YAWPITCHROLL
-
-// uncomment "OUTPUT_READABLE_REALACCEL" if you want to see acceleration
-// components with gravity removed. This acceleration reference frame is
-// not compensated for orientation, so +X is always +X according to the
-// sensor, just without the effects of gravity. If you want acceleration
-// compensated for orientation, us OUTPUT_READABLE_WORLDACCEL instead.
-//#define OUTPUT_READABLE_REALACCEL
-
-// uncomment "OUTPUT_READABLE_WORLDACCEL" if you want to see acceleration
-// components with gravity removed and adjusted for the world frame of
-// reference (yaw is relative to initial orientation, since no magnetometer
-// is present in this case). Could be quite handy in some cases.
-//#define OUTPUT_READABLE_WORLDACCEL
-
-// uncomment "OUTPUT_TEAPOT" if you want output that matches the
-// format used for the InvenSense teapot demo
-//#define OUTPUT_TEAPOT
-
-
 #define LED_PIN 13 
 bool blinkState = false;
 
 // MPU control/status vars
 bool dmpReady = false;  // set true if DMP init was successful
-//uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
 uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
 uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
 uint16_t fifoCount;     // count of all bytes currently in FIFO
@@ -90,6 +65,7 @@ uint8_t fifoBuffer[64]; // FIFO storage buffer
 
 // orientation/motion vars
 Quaternion q;           // [w, x, y, z]         quaternion container
+
 VectorInt16 aa;         // [x, y, z]            accel sensor measurements
 VectorInt16 aaReal;     // [x, y, z]            gravity-free accel sensor measurements
 VectorInt16 aaWorld;    // [x, y, z]            world-frame accel sensor measurements
@@ -97,80 +73,139 @@ VectorFloat gravity;    // [x, y, z]            gravity vector
 float euler[3];         // [psi, theta, phi]    Euler angle container
 float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
 
-// packet structure for InvenSense teapot demo
-uint8_t teapotPacket[14] = { '$', 0x02, 0,0, 0,0, 0,0, 0,0, 0x00, 0x00, '\r', '\n' };
 
-//HELPER METHODS
+// ================================================================
+// ===                    HELPER METHODS                        ===
+// ================================================================
 void setupServos() {
+
     pitchServo1.attach(PITCH_SERVO1_PIN);
     pitchServo2.attach(PITCH_SERVO2_PIN);
-    rollServo1.attach(ROLL_SERVO1_PIN);
-    rollServo2.attach(ROLL_SERVO2_PIN);
+    yawServo1.attach(ROLL_SERVO1_PIN);
+    yawServo2.attach(ROLL_SERVO2_PIN);
 
     // Initialize servos to neutral pos
     pitchServo1.write(90);
     pitchServo2.write(90);
-    rollServo1.write(90);
-    rollServo2.write(90);
+    yawServo1.write(90);
+    yawServo2.write(90);
 
 }
 
-void adjustPitchServos(float controlSignal) {
-    int adjustment = (int)controlSignal;
+//Adjusts servos with signals from PID controller
+void adjustServos(float pitchControlSignal, float rollControlSignal) {
+    int pitchAdjustment = (int)pitchControlSignal;
+    int rollAdjustment = (int)rollControlSignal;
 
-    // Constrain between 15 and 165 deg
-    int pitchServo1Angle = constrain(90 + adjustment, 15, 165);
-    int pitchServo2Angle = constrain(90 - adjustment, 15, 165);
+    // Map adjustments to be between 15 and 165 degrees
+    int pitchServo1Angle = constrain(90 + pitchAdjustment, 30, 150);
+    int pitchServo2Angle = constrain(90 - pitchAdjustment, 30, 150);
+    int rollServo1Angle = constrain(90 + rollAdjustment, 30, 150);
+    int rollServo2Angle = constrain(90 - rollAdjustment, 30, 150);
 
     pitchServo1.write(pitchServo1Angle);
     pitchServo2.write(pitchServo2Angle);
+    yawServo1.write(rollServo1Angle);
+    yawServo2.write(rollServo2Angle);
 }
 
-void adjustRollServos(float controlSignal) {
-    int adjustment = (int)controlSignal;
+// Cross product of two VectorFloat objects
+VectorFloat cross(const VectorFloat& v1, const VectorFloat& v2) {
+        
+    VectorFloat cross_P;
 
-    // Constrain between 15 and 165 deg
-    int rollServo1Angle = constrain(90 + adjustment, 15, 165);
-    int rollServo2Angle = constrain(90 - adjustment, 15, 165);
+    cross_P.x = v1.y * v2.z - v1.z * v2.y;
+    cross_P.y = v1.z * v2.x - v1.x * v2.z;
+    cross_P.z = v1.x * v2.y - v1.y * v2.x;
 
-    rollServo1.write(rollServo1Angle);
-    rollServo2.write(rollServo2Angle);
+    return cross_P;
 }
 
-void calculatePitchPID(float currentQuaternionW, float currentQuaternionX) {
-   
-    // Convert quat to deg
-    float currentPitch = atan2(2.0 * (currentQuaternionW * currentQuaternionX), 1.0 - 2.0 * (currentQuaternionX * currentQuaternionX)) * 180 / M_PI;
-    float pitchError = targetPitch - currentPitch;
-    pitchIntegral += pitchError * dt;
-    float pitchDerivative = (pitchError - lastPitchError) / dt;
-
-    float pitchControlSignal = kp * pitchError + ki * pitchIntegral + kd * pitchDerivative;
-
-    adjustPitchServos(pitchControlSignal);
-
-    Serial.print(">PITCH: ");
-    Serial.println(pitchControlSignal);
-
-    lastPitchError = pitchError;
+// Dot product of two VectorFloat objects
+float dot(const VectorFloat& v1, const VectorFloat& v2) {
+    return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
 }
 
-void calculateRollPID(float currentQuaternionW, float currentQuaternionY) {
+// Magnitude of a VectorFloat
+float magnitude(const VectorFloat& v) {
+    return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+}
 
-    // Convert quat to deg
-    float currentRoll = atan2(2.0 * (currentQuaternionW * currentQuaternionY), 1.0 - 2.0 * (currentQuaternionY * currentQuaternionY)) * 180 / M_PI;
-    float rollError = targetRoll - currentRoll;
-    rollIntegral += rollError * dt;
-    float rollDerivative = (rollError - lastRollError) / dt;
+Quaternion calculatePIDWithQuaternions() {
 
-    float rollControlSignal = kp * rollError + ki * rollIntegral + kd * rollDerivative;
+    VectorFloat vref = {0.0f, 1.0f, 0.0f}; // Reference vector
+    Quaternion worldQuat(refQuaternion.w, refQuaternion.x, refQuaternion.y, refQuaternion.z);
 
-    adjustRollServos(rollControlSignal);
+    // Rotate vref to body frame using the world quaternion
+    Quaternion vrefQuat(0.0f, vref.x, vref.y, vref.z);
+    Quaternion rotatedQuat = (worldQuat.getProduct(vrefQuat)).getProduct(worldQuat.getConjugate());
+    VectorFloat vdesBody = {rotatedQuat.x, rotatedQuat.y, rotatedQuat.z};
 
-    Serial.print(">ROLL: ");
-    Serial.println(rollControlSignal);
+    // Calculate the rotation vector (vrot)
+    VectorFloat vrot = cross(vref, vdesBody);
 
-    lastRollError = rollError;
+    // Calculate rotation quaternion's w-component
+    float vrefLength = magnitude(vref);
+    float vdesBodyLength = magnitude(vdesBody);
+    float dotProd = dot(vref, vdesBody);
+    float w = std::sqrt((vrefLength * vrefLength) * (vdesBodyLength * vdesBodyLength)) + dotProd;
+
+    // Create and normalize rotation quaternion
+    Quaternion rotQuat(w, vrot.x, vrot.y, vrot.z);
+    rotQuat.normalize();
+
+    return rotQuat;
+
+}
+
+void calibrateAltimeter() {
+    Serial.println(F("Calibrating altimeter..."));
+    float totalAltitude = 0.0;
+    int sampleCount = 100;
+
+    for (int i = 0; i < sampleCount; i++) {
+        totalAltitude += bmp.readAltitude(1013.25); // Default sea level pressure
+        delay(10); // Small delay between samples
+    }
+
+    altitudeOffset = totalAltitude / sampleCount;
+    Serial.print(F("Altitude offset set to: "));
+    Serial.println(altitudeOffset);
+}
+
+void controlServosWithPID(Quaternion rotQuat, VectorFloat gyro) {
+
+    // Step 1: Compute the error vector (Verr) from rotQuat
+    VectorFloat Verr = {rotQuat.x, rotQuat.y, rotQuat.z};
+
+    // Step 2: Derivative term (angular velocity from gyro)
+    VectorFloat angularVelocity = gyro;
+
+    // Step 3: Integral term (accumulate error over time)
+    float currentTime = millis() / 1000.0f; // Time in seconds
+    float deltaTime = currentTime - lastUpdateTime;
+    integralErr.x += Verr.x * deltaTime;
+    integralErr.y += Verr.y * deltaTime;
+    integralErr.z += Verr.z * deltaTime;
+    lastUpdateTime = currentTime;
+
+    // Step 4: Compute control signals for pitch and yaw
+    float pitchControlSignal = Kp * Verr.x + Kd * angularVelocity.x + Ki * integralErr.x;
+    float yawControlSignal = Kp * Verr.z + Kd * angularVelocity.z + Ki * integralErr.z;
+
+    // Step 5: Map control signals to servo angles
+    // Assuming servos are centered at 90 degrees and have a range of 0-180 degrees
+    int pitchServo1Angle = constrain(90 + pitchControlSignal, 0, 180);
+    int pitchServo2Angle = constrain(90 - pitchControlSignal, 0, 180); // Opposing servo
+    int yawServo1Angle = constrain(90 + yawControlSignal, 0, 180);
+    int yawServo2Angle = constrain(90 - yawControlSignal, 0, 180); // Opposing servo
+
+    // Step 6: Write to servos
+    pitchServo1.write(pitchServo1Angle);
+    pitchServo2.write(pitchServo2Angle);
+    yawServo1.write(yawServo1Angle);
+    yawServo2.write(yawServo2Angle);
+    
 }
 
 // ================================================================
@@ -201,12 +236,6 @@ void setup() {
     Serial.println(F("Initializing DMP..."));
     devStatus = mpu.dmpInitialize();
 
-    // supply your own gyro offsets here, scaled for min sensitivity
-    //mpu.setXGyroOffset(220);
-    //mpu.setYGyroOffset(76);
-    //mpu.setZGyroOffset(-85);
-    //mpu.setZAccelOffset(1788);
-
     // make sure mpu initialized (returns 0 if so)
     if (devStatus == 0) {
         // Calibration Time: generate offsets and calibrate our MPU6050
@@ -231,15 +260,19 @@ void setup() {
         Serial.println(F(")"));
     }
 
+    if (!bmp.begin(0x76)) {
+        Serial.println(F("Could not find a valid BMP280 sensor, check wiring!"));
+        while (1);
+    }
+
+    calibrateAltimeter();
+
     setupServos();
 
     Serial.print("SETUP COMPLETE!");
     // configure LED for output
     pinMode(LED_PIN, OUTPUT);
 }
-
-
-
 
 // ================================================================
 // ===                    MAIN PROGRAM LOOP                     ===
@@ -249,107 +282,50 @@ void loop() {
     
     // if programming failed, don't try to do anything
     if (!dmpReady) return;
+
+    unsigned long currentTime = millis();
+    dt = (currentTime - lastUpdateTime) / 1000.0; // Calculate true time delta in seconds
+    lastUpdateTime = currentTime;
+
+
     // read a packet from FIFO
     if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) { // Get the Latest packet 
-        #ifdef OUTPUT_READABLE_QUATERNION
-            // display quaternion values in easy matrix form: w x y z
-            mpu.dmpGetQuaternion(&q, fifoBuffer);
-            /*
-            Serial.print("quat\t");
-            Serial.print(q.w);
-            Serial.print("\t");
-            Serial.print(q.x);
-            Serial.print("\t");
-            Serial.print(q.y);
-            Serial.print("\t");
-            Serial.println(q.z);
-            */
+        
+        // display quaternion values in easy matrix form: w x y z
+        mpu.dmpGetQuaternion(&q, fifoBuffer);
+            
+        refQuaternion = q;
 
-            //Calculate new dt
-            unsigned long currentTime = millis();
-            dt = (currentTime - lastUpdateTime) / 1000.0; // Calculate true time delta in seconds
-            lastUpdateTime = currentTime;
+        float currentHeight = bmp.readAltitude(1013.25) - altitudeOffset; // Adjust sea level pressure if needed
+
+        int16_t gyroX, gyroY, gyroZ;
+        mpu.getRotation(&gyroX, &gyroY, &gyroZ);
+
+        float gyroX_dps = gyroX / 16.4; //Sensitivity is 16.4 LSB/degrees/sec
+        float gyroY_dps = gyroY / 16.4;
+        float gyroZ_dps = gyroZ / 16.4;
+
+        VectorFloat gyro = {gyroX_dps, gyroY_dps, gyroZ_dps};
+        controlServosWithPID(calculatePIDWithQuaternions(), gyro);
 
 
-            // calculates PID and adjusts servos
-            calculatePitchPID(q.w, q.x);
-            calculateRollPID(q.w, q.y);
-
-        #endif
-
-        #ifdef OUTPUT_READABLE_EULER
-            // display Euler angles in degrees
-            mpu.dmpGetQuaternion(&q, fifoBuffer);
-            mpu.dmpGetEuler(euler, &q);
-            Serial.print("euler\t");
-            Serial.print(euler[0] * 180/M_PI);
-            Serial.print("\t");
-            Serial.print(euler[1] * 180/M_PI);
-            Serial.print("\t");
-            Serial.println(euler[2] * 180/M_PI);
-
-        #endif
-
-        #ifdef OUTPUT_READABLE_YAWPITCHROLL
-            // display Euler angles in degrees
-            mpu.dmpGetQuaternion(&q, fifoBuffer);
-            mpu.dmpGetGravity(&gravity, &q);
-            mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-            Serial.print("ypr\t");
-            Serial.print(ypr[0] * 180/M_PI);
-            Serial.print("\t");
-            Serial.print(ypr[1] * 180/M_PI);
-            Serial.print("\t");
-            Serial.println(ypr[2] * 180/M_PI);
-        #endif
-
-        #ifdef OUTPUT_READABLE_REALACCEL
-            // display real acceleration, adjusted to remove gravity
-            mpu.dmpGetQuaternion(&q, fifoBuffer);
-            mpu.dmpGetAccel(&aa, fifoBuffer);
-            mpu.dmpGetGravity(&gravity, &q);
-            mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
-            Serial.print("areal\t");
-            Serial.print(aaReal.x);
-            Serial.print("\t");
-            Serial.print(aaReal.y);
-            Serial.print("\t");
-            Serial.println(aaReal.z);
-        #endif
-
-        #ifdef OUTPUT_READABLE_WORLDACCEL
-            // display initial world-frame acceleration, adjusted to remove gravity
-            // and rotated based on known orientation from quaternion
-            mpu.dmpGetQuaternion(&q, fifoBuffer);
-            mpu.dmpGetAccel(&aa, fifoBuffer);
-            mpu.dmpGetGravity(&gravity, &q);
-            mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
-            mpu.dmpGetLinearAccelInWorld(&aaWorld, &aaReal, &q);
-            Serial.print("aworld\t");
-            Serial.print(aaWorld.x);
-            Serial.print("\t");
-            Serial.print(aaWorld.y);
-            Serial.print("\t");
-            Serial.println(aaWorld.z);
-        #endif
-    
-        #ifdef OUTPUT_TEAPOT
-            // display quaternion values in InvenSense Teapot demo format:
-            teapotPacket[2] = fifoBuffer[0];
-            teapotPacket[3] = fifoBuffer[1];
-            teapotPacket[4] = fifoBuffer[4];
-            teapotPacket[5] = fifoBuffer[5];
-            teapotPacket[6] = fifoBuffer[8];
-            teapotPacket[7] = fifoBuffer[9];
-            teapotPacket[8] = fifoBuffer[12];
-            teapotPacket[9] = fifoBuffer[13];
-            Serial.write(teapotPacket, 14);
-            teapotPacket[11]++; // packetCount, loops at 0xFF on purpose
-        #endif
+        // display Euler angles in degrees
+        mpu.dmpGetQuaternion(&q, fifoBuffer);
+        mpu.dmpGetGravity(&gravity, &q);
+        mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+        Serial.print("ypr\t");
+        Serial.print(ypr[0] * 180/M_PI);
+        Serial.print("\t");
+        Serial.print(ypr[1] * 180/M_PI);
+        Serial.print("\t");
+        Serial.println(ypr[2] * 180/M_PI);
 
         // blink LED to indicate activity
         blinkState = !blinkState;
         digitalWrite(LED_PIN, blinkState);
+
     }
 
 }
+    
+
