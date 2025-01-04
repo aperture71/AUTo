@@ -19,7 +19,7 @@ Adafruit_BMP280 bmp;
 
 // PID variables
 float Kp = 500.0f; // Proportional gain
-float Kd = 0.2f; // Derivative gain
+float Kd = 0.5f; // Derivative gain
 float Ki = 0.0f; // Integral gain
 
 
@@ -48,10 +48,10 @@ Servo yawServo1;
 Servo yawServo2;
 
 // Servo pin assignments
-#define PITCH_SERVO1_PIN 2
-#define PITCH_SERVO2_PIN 5
-#define ROLL_SERVO1_PIN 3
-#define ROLL_SERVO2_PIN 4
+#define PITCH_SERVO1_PIN 3
+#define PITCH_SERVO2_PIN 4
+#define ROLL_SERVO1_PIN 2
+#define ROLL_SERVO2_PIN 5
 
 #define LED_PIN 13 
 bool blinkState = false;
