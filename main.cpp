@@ -5,6 +5,7 @@
 #include <Adafruit_BMP280.h>
 #include "MPU6050_6Axis_MotionApps20.h"
 
+#include <SD.h>
 #include "helper_3dmath.h"
 
 // Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation
@@ -12,6 +13,10 @@
 #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
     #include "Wire.h"
 #endif
+
+#define SD_CS_PIN BUILTIN_SDCARD
+File logFile;
+int cycleCounter = 0;
 
 //mpu6050 I2C address is 0x68
 MPU6050 mpu;
@@ -158,21 +163,6 @@ Quaternion calculatePIDWithQuaternions() {
 
 }
 
-void calibrateAltimeter() {
-    Serial.println(F("Calibrating altimeter..."));
-    float totalAltitude = 0.0;
-    int sampleCount = 100;
-
-    for (int i = 0; i < sampleCount; i++) {
-        totalAltitude += bmp.readAltitude(1013.25); // Default sea level pressure
-        delay(10); // Small delay between samples
-    }
-
-    altitudeOffset = totalAltitude / sampleCount;
-    Serial.print(F("Altitude offset set to: "));
-    Serial.println(altitudeOffset);
-}
-
 void controlServosWithPID(Quaternion rotQuat, VectorFloat gyro) {
 
     // Step 1: Compute the error vector (Verr) from rotQuat
@@ -208,6 +198,39 @@ void controlServosWithPID(Quaternion rotQuat, VectorFloat gyro) {
     
 }
 
+void calibrateAltimeter() {
+    Serial.println(F("Calibrating altimeter..."));
+    float totalAltitude = 0.0;
+    int sampleCount = 100;
+
+    for (int i = 0; i < sampleCount; i++) {
+        totalAltitude += bmp.readAltitude(1013.25); // Default sea level pressure
+        delay(10); // Small delay between samples
+    }
+
+    altitudeOffset = totalAltitude / sampleCount;
+    Serial.print(F("Altitude offset set to: "));
+    Serial.println(altitudeOffset);
+}
+
+void logData(float time, float altitude, float yaw, float pitch, float roll) {
+    logFile = SD.open("flight_data.csv", FILE_WRITE);
+    if (logFile) {
+        logFile.print(time);
+        logFile.print(", ");
+        logFile.print(altitude);
+        logFile.print(", ");
+        logFile.print(yaw);
+        logFile.print(", ");
+        logFile.print(pitch);
+        logFile.print(", ");
+        logFile.println(roll);
+        logFile.close();
+    } else {
+        Serial.println("Failed to write to file.");
+    }
+}
+
 // ================================================================
 // ===                      INITIAL SETUP                       ===
 // ================================================================
@@ -223,6 +246,22 @@ void setup() {
     #endif
 
     Serial.begin(115200);
+
+     // Initialize SD card
+    if (!SD.begin(SD_CS_PIN)) {
+        Serial.println("SD card initialization failed!");
+        while (1); // Stop if SD card initialization fails
+    }
+    Serial.println("SD card initialized.");
+
+    // Open the log file
+    logFile = SD.open("flight_data.csv", FILE_WRITE);
+    if (!logFile) {
+        Serial.println("Failed to open file for writing.");
+        while (1); // Stop if the file can't be opened
+    }
+    logFile.println("Time (s), Altitude (m), Yaw (deg), Pitch (deg), Roll (deg)"); // Add CSV header
+    logFile.close();
 
     // initialize device
     Serial.println(F("Initializing I2C devices..."));
@@ -308,17 +347,20 @@ void loop() {
         VectorFloat gyro = {gyroX_dps, gyroY_dps, gyroZ_dps};
         controlServosWithPID(calculatePIDWithQuaternions(), gyro);
 
+        cycleCounter++;
 
-        // display Euler angles in degrees
-        mpu.dmpGetQuaternion(&q, fifoBuffer);
-        mpu.dmpGetGravity(&gravity, &q);
-        mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-        Serial.print("ypr\t");
-        Serial.print(ypr[0] * 180/M_PI);
-        Serial.print("\t");
-        Serial.print(ypr[1] * 180/M_PI);
-        Serial.print("\t");
-        Serial.println(ypr[2] * 180/M_PI);
+        // Log data every 10 cycles
+        if (cycleCounter >= 3) {
+
+            //Get euler angles and write to log file
+            mpu.dmpGetGravity(&gravity, &q);
+            mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+            logData(currentTime / 1000.0, currentHeight, ypr[0] * 180 / M_PI, ypr[1] * 180 / M_PI, ypr[2] * 180 / M_PI);
+            
+            cycleCounter = 0; // Reset the counter
+
+        }
+        
 
         // blink LED to indicate activity
         blinkState = !blinkState;
