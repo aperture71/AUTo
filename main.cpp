@@ -30,9 +30,8 @@ float Ki = 0.0f; // Integral gain
 
 VectorFloat integralErr = {0.0f, 0.0f, 0.0f};
 
-Quaternion worldQuaternion = {0, 0, 0, 1};
 Quaternion refQuaternion;
-
+bool navEnabled = true;
 
 float targetPitch = 0.0;  // Target pitch orientation (degrees)
 float targetRoll = 0.0;   // Target roll orientation (degrees)
@@ -345,18 +344,33 @@ void loop() {
         float gyroZ_dps = gyroZ / 16.4;
 
         VectorFloat gyro = {gyroX_dps, gyroY_dps, gyroZ_dps};
-        controlServosWithPID(calculatePIDWithQuaternions(), gyro);
+
+        if(navEnabled){
+            controlServosWithPID(calculatePIDWithQuaternions(), gyro);
+        }
 
         cycleCounter++;
 
         // Log data every 10 cycles
         if (cycleCounter >= 3) {
 
-            //Get euler angles and write to log file
+            //Get euler angles and write two log file
             mpu.dmpGetGravity(&gravity, &q);
             mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
             logData(currentTime / 1000.0, currentHeight, ypr[0] * 180 / M_PI, ypr[1] * 180 / M_PI, ypr[2] * 180 / M_PI);
             
+            // Check if rocket is past 50 degrees in yaw or roll and disable navigation
+            if (abs(ypr[0] * 180 / M_PI) > 50 || abs(ypr[2] * 180 / M_PI) > 50) {
+
+                navEnabled = false;
+
+                pitchServo1.write(90);
+                pitchServo2.write(90);
+                yawServo1.write(90);
+                yawServo2.write(90);
+
+            }
+
             cycleCounter = 0; // Reset the counter
 
         }
