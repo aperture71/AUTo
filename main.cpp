@@ -33,16 +33,8 @@ VectorFloat integralErr = {0.0f, 0.0f, 0.0f};
 Quaternion refQuaternion;
 bool navEnabled = true;
 
-float targetPitch = 0.0;  // Target pitch orientation (degrees)
-float targetRoll = 0.0;   // Target roll orientation (degrees)
-float lastPitchError = 0.0;
-float lastRollError = 0.0;
-float pitchIntegral = 0.0;
-float rollIntegral = 0.0;
 float dt;
-
 unsigned long lastUpdateTime = 0;
-
 float altitudeOffset = 0.0;
 
 // Declare servo objects
@@ -383,5 +375,3 @@ void loop() {
     }
 
 }
-    
-
